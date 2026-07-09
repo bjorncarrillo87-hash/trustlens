@@ -11,20 +11,13 @@ Usage:
 """
 import json
 
-from trustlens.scoring import score_token
+from trustlens.scoring import list_currencies, score_token
 
 # (label, issuer, currency, category) -- category is just for grouping the printout.
 CASES = [
     # --- known-good reference tokens ---
     ("RLUSD (real, Ripple)", "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De", "RLUSD", "good"),
     ("SOLO (real, Sologenic)", "rsoLo2S1kiGeCcn6hCUXVrCpGMWLrRrLZz", "SOLO", "good"),
-
-    # --- the 4-in-1 impersonation farm: one wallet, created 2026-07-06,
-    #     issuing fake BTC + ETH + USDC + USDT simultaneously (2 holders each) ---
-    ("BTC (FAKE - impersonation farm)", "rGESkMDtLd4ot85wCTxhzVf647UbYcWiTy", "BTC", "scam"),
-    ("ETH (FAKE - impersonation farm)", "rGESkMDtLd4ot85wCTxhzVf647UbYcWiTy", "ETH", "scam"),
-    ("USDC (FAKE - impersonation farm)", "rGESkMDtLd4ot85wCTxhzVf647UbYcWiTy", "USDC", "scam"),
-    ("USDT (FAKE - impersonation farm)", "rGESkMDtLd4ot85wCTxhzVf647UbYcWiTy", "USDT", "scam"),
 
     # --- fake OUSD pair, both created 2026-07-03 (right after the OUSD scam
     #     alert covered by GrimmReaper/crypto.news on 2026-07-02) ---
@@ -37,6 +30,14 @@ CASES = [
     ("USDC (real gateway)", "rGm7WCVp9gb4jZHWTEtGUr4dd74z2XuWhE", "USDC", "good"),
     ("USDT (real gateway)", "rDnNaxiXctUarwQPvjjfHyhzhBxKu8yJNC", "USDT", "good"),
 ]
+
+# The impersonation farm: one wallet, first spotted 2026-07-06 issuing 4 fake
+# blue-chips, turned out (via list_currencies) to be impersonating 22 real assets
+# at once. Auto-discovered rather than hardcoded, so this stays accurate if it
+# mints more -- don't hardcode a subset here again, it undercounts.
+FARM_ISSUER = "rGESkMDtLd4ot85wCTxhzVf647UbYcWiTy"
+for c in list_currencies(FARM_ISSUER):
+    CASES.append((f"{c['currency_name']} (FAKE - impersonation farm)", FARM_ISSUER, c["currency"], "scam"))
 
 
 def main() -> None:

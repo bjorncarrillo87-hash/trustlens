@@ -92,6 +92,19 @@ def _verdict(score: int) -> str:
     return "danger"
 
 
+def list_currencies(issuer: str) -> list[dict[str, str]]:
+    """Every currency a given issuer actually has in circulation, decoded.
+
+    An XRPL issuer account can issue more than one token (a single gateway
+    commonly issues USD, EUR, BTC, etc from one address), so "issuer" alone
+    doesn't always uniquely identify a token. This lets a caller ask "what
+    does this address even issue?" before -- or instead of -- picking one.
+    """
+    gb = ledger.gateway_balances(issuer)
+    codes = sorted((gb.get("obligations") or {}).keys())
+    return [{"currency": c, "currency_name": decode_currency(c)} for c in codes]
+
+
 def score_token(issuer: str, currency: str) -> TokenScore:
     """Fetch live mainnet data and compute the trust score for one token.
 
