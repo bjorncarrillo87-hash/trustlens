@@ -1,0 +1,238 @@
+"""TrustLens API + web app.
+
+Three surfaces over one scoring engine:
+  GET /                      human web page (free)
+  GET /api/score            free JSON API (rate-limited, for humans / light use)
+  GET /api/score/pro        x402-metered JSON API (for AI agents / commercial use)
+
+Scoring reads XRPL *mainnet* (real tokens). The x402 payment layer settles on
+*testnet* during the MVP, so no real funds move while we build and demo.
+"""
+from __future__ import annotations
+
+import os
+
+from fastapi import FastAPI, Query
+from fastapi.responses import HTMLResponse, JSONResponse
+
+from .scoring import score_token
+
+app = FastAPI(title="TrustLens", version="0.1.0")
+
+# --- x402 paid tier -------------------------------------------------------------
+# Reuses the proven x402-xrpl flow from x402-sandbox. Testnet merchant + facilitator.
+MERCHANT_ADDRESS = os.environ.get("TRUSTLENS_PAYTO", "rHTEGqvwnBNNENEmUT7f1Ch7B3cVh1G7M4")
+FACILITATOR_URL = os.environ.get("TRUSTLENS_FACILITATOR", "https://xrpl-facilitator-testnet.t54.ai")
+PRICE_DROPS = os.environ.get("TRUSTLENS_PRICE_DROPS", "10000")  # 0.01 XRP per call
+# Public origin this instance is reachable at (e.g. "https://trustlens.example.com").
+# Unset while only running locally -- resource URLs fall back to a relative path,
+# which is honest (no public origin exists yet) but not crawlable by a directory.
+BASE_URL = os.environ.get("TRUSTLENS_BASE_URL", "").rstrip("/")
+
+PRO_PATH = "/api/score/pro"
+PRO_DESCRIPTION = "TrustLens token trust score (per call)"
+PRO_RESOURCE_URL = f"{BASE_URL}{PRO_PATH}" if BASE_URL else PRO_PATH
+
+try:
+    from x402_xrpl.server import require_payment
+
+    app.middleware("http")(
+        require_payment(
+            path=PRO_PATH,
+            price=PRICE_DROPS,
+            pay_to_address=MERCHANT_ADDRESS,
+            network="xrpl:1",
+            asset="XRP",
+            facilitator_url=FACILITATOR_URL,
+            # `resource` becomes the 402 body's resource.url. It must be the real,
+            # fetchable URL of the paid endpoint (not an opaque label) so a directory
+            # crawler (e.g. the XRPL AI Hub) can link straight to it.
+            resource=PRO_RESOURCE_URL,
+            description=PRO_DESCRIPTION,
+            source_tag=804681468,
+        )
+    )
+    X402_ENABLED = True
+except Exception as exc:  # noqa: BLE001 - run without the paid tier if the SDK is missing
+    X402_ENABLED = False
+    _X402_ERROR = str(exc)
+
+
+def _score(issuer: str, currency: str) -> dict:
+    return score_token(issuer.strip(), currency).to_dict()
+
+
+@app.get("/api/score")
+def api_score(issuer: str = Query(...), currency: str = Query(...)) -> JSONResponse:
+    """Free token score. In production this tier is rate-limited per IP."""
+    return JSONResponse(_score(issuer, currency))
+
+
+@app.get("/api/score/pro")
+def api_score_pro(issuer: str = Query(...), currency: str = Query(...)) -> JSONResponse:
+    """Metered token score. Gated by the x402 middleware above (0.01 XRP / call)."""
+    return JSONResponse(_score(issuer, currency))
+
+
+@app.get("/.well-known/x402")
+def well_known_x402() -> JSONResponse:
+    """x402 service discovery document.
+
+    No formally published JSON Schema was found for this file as of 2026-07;
+    this shape follows what the XRPL AI Hub's own listing page (xrpl-ai.org/join)
+    says it looks for: a top-level service ``name`` plus a ``name``/``description``
+    per paid resource. Re-check against the hub once we actually attempt a listing.
+    """
+    resources = []
+    if X402_ENABLED:
+        resources.append(
+            {
+                "resource": PRO_RESOURCE_URL,
+                "name": "TrustLens Score",
+                "description": PRO_DESCRIPTION,
+                "mimeType": "application/json",
+            }
+        )
+    return JSONResponse(
+        {
+            "name": "TrustLens",
+            "description": "Transparent 0-100 trust score for any XRP Ledger token.",
+            "resources": resources,
+        }
+    )
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    return {"ok": True, "x402": X402_ENABLED}
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> str:
+    return INDEX_HTML
+
+
+INDEX_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>TrustLens - a trust score for XRPL tokens</title>
+<style>
+  :root { --bg:#0b1020; --card:#151b30; --line:#28304d; --text:#e7ecff; --muted:#93a0c8;
+          --good:#28c76f; --caution:#ffb020; --risky:#ff7a45; --danger:#ff4d5e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:radial-gradient(1200px 600px at 50% -10%, #1a2340, var(--bg));
+         color:var(--text); font:16px/1.5 ui-sans-serif,system-ui,Segoe UI,Roboto,Arial; }
+  .wrap { max-width:760px; margin:0 auto; padding:48px 20px 80px; }
+  h1 { font-size:34px; margin:0 0 6px; letter-spacing:-.5px; }
+  .sub { color:var(--muted); margin:0 0 28px; }
+  form { display:flex; gap:10px; flex-wrap:wrap; }
+  input { flex:1 1 220px; padding:14px 16px; border-radius:12px; border:1px solid var(--line);
+          background:#0e142a; color:var(--text); font-size:15px; }
+  button { padding:14px 22px; border:0; border-radius:12px; background:#4c6fff; color:#fff;
+           font-weight:600; font-size:15px; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:progress; }
+  .examples { margin:14px 0 0; color:var(--muted); font-size:14px; }
+  .examples a { color:#9db2ff; cursor:pointer; text-decoration:none; margin-right:12px; }
+  .card { margin-top:28px; background:var(--card); border:1px solid var(--line);
+          border-radius:18px; padding:26px; display:none; }
+  .head { display:flex; align-items:center; gap:22px; }
+  .gauge { width:104px; height:104px; border-radius:50%; display:grid; place-items:center;
+           font-size:30px; font-weight:800; flex:0 0 auto; }
+  .verdict { font-size:22px; font-weight:700; text-transform:capitalize; }
+  .name { color:var(--muted); font-size:14px; word-break:break-all; }
+  .reasons { list-style:none; padding:0; margin:22px 0 0; }
+  .reasons li { display:flex; gap:12px; padding:10px 0; border-top:1px solid var(--line); }
+  .pts { font-variant-numeric:tabular-nums; font-weight:700; min-width:42px; }
+  .sev { font-size:11px; text-transform:uppercase; letter-spacing:.5px; padding:2px 8px;
+         border-radius:999px; align-self:center; }
+  .foot { margin-top:22px; color:var(--muted); font-size:12px; }
+  .err { color:var(--danger); margin-top:18px; display:none; }
+  .badge { display:inline-block; font-size:12px; color:var(--muted); border:1px solid var(--line);
+           padding:4px 10px; border-radius:999px; margin-bottom:22px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="badge">XRPL mainnet - read-only - no wallet needed</div>
+  <h1>TrustLens</h1>
+  <p class="sub">Paste any XRP Ledger token. Get a 0-100 trust score and the reasons behind it.</p>
+  <form id="f">
+    <input id="issuer" placeholder="Issuer address (r...)" autocomplete="off"/>
+    <input id="currency" placeholder="Currency (e.g. SOLO or USD)" autocomplete="off" style="flex:0 1 220px"/>
+    <button id="go" type="submit">Check</button>
+  </form>
+  <div class="examples">
+    Try:
+    <a data-i="rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De" data-c="RLUSD">RLUSD</a>
+    <a data-i="rsoLo2S1kiGeCcn6hCUXVrCpGMWLrRrLZz" data-c="SOLO">SOLO</a>
+  </div>
+  <div class="err" id="err"></div>
+  <div class="card" id="card">
+    <div class="head">
+      <div class="gauge" id="gauge">--</div>
+      <div>
+        <div class="verdict" id="verdict"></div>
+        <div class="name" id="name"></div>
+      </div>
+    </div>
+    <ul class="reasons" id="reasons"></ul>
+    <div class="foot" id="foot"></div>
+  </div>
+</div>
+<script>
+const COLORS = { trusted:'#28c76f', caution:'#ffb020', risky:'#ff7a45', danger:'#ff4d5e' };
+const SEVBG  = { good:'#153a27', low:'#33351d', medium:'#3a2a1a', high:'#3a1d20', critical:'#45161c' };
+const $ = id => document.getElementById(id);
+
+async function check(issuer, currency) {
+  $('err').style.display='none'; $('card').style.display='none';
+  $('go').disabled=true; $('go').textContent='Checking...';
+  try {
+    const r = await fetch(`/api/score?issuer=${encodeURIComponent(issuer)}&currency=${encodeURIComponent(currency)}`);
+    const d = await r.json();
+    if (d.detail) throw new Error(typeof d.detail==='string'?d.detail:'Bad request');
+    render(d);
+  } catch(e) {
+    $('err').textContent = 'Could not score that token: ' + e.message;
+    $('err').style.display='block';
+  } finally {
+    $('go').disabled=false; $('go').textContent='Check';
+  }
+}
+
+function render(d) {
+  const c = COLORS[d.verdict] || '#4c6fff';
+  const g = $('gauge');
+  g.textContent = d.score;
+  g.style.background = `conic-gradient(${c} ${d.score*3.6}deg, #0e142a 0)`;
+  g.style.color = c;
+  $('verdict').textContent = d.verdict;
+  $('verdict').style.color = c;
+  $('name').textContent = `${d.currency_name}  -  ${d.issuer}`;
+  const ul = $('reasons'); ul.innerHTML='';
+  for (const rs of d.reasons) {
+    const li = document.createElement('li');
+    const sign = rs.points>=0 ? '+' : '';
+    const col = rs.points>=0 ? '#28c76f' : '#ff7a45';
+    li.innerHTML = `<span class="pts" style="color:${col}">${sign}${rs.points}</span>`
+      + `<span class="sev" style="background:${SEVBG[rs.severity]||'#222'}">${rs.severity}</span>`
+      + `<span>${rs.label}</span>`;
+    ul.appendChild(li);
+  }
+  $('foot').textContent = d.disclaimer;
+  $('card').style.display='block';
+}
+
+$('f').addEventListener('submit', e => {
+  e.preventDefault();
+  const i=$('issuer').value.trim(), c=$('currency').value.trim();
+  if (i && c) check(i, c);
+});
+document.querySelectorAll('.examples a').forEach(a => a.addEventListener('click', () => {
+  $('issuer').value=a.dataset.i; $('currency').value=a.dataset.c; check(a.dataset.i, a.dataset.c);
+}));
+</script>
+</body>
+</html>"""

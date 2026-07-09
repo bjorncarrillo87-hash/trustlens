@@ -1,0 +1,7 @@
+# TrustLens reuses the x402-sandbox venv, which already has these.
+# To set up a fresh env:  python -m venv venv && venv/Scripts/pip install -r requirements.txt
+fastapi==0.115.14
+uvicorn==0.30.6
+requests==2.34.2
+xrpl-py==5.0.0
+x402-xrpl==0.2.0
