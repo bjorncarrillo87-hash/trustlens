@@ -189,6 +189,9 @@ const $ = id => document.getElementById(id);
 async function check(issuer, currency) {
   $('err').style.display='none'; $('card').style.display='none';
   $('go').disabled=true; $('go').textContent='Checking...';
+  // Free-tier hosting can spin down when idle; a cold start can take ~30-50s.
+  // Without this, a first-time visitor just sees a hung button and assumes it's broken.
+  const wakingUp = setTimeout(() => { $('go').textContent = 'Waking up server...'; }, 4000);
   try {
     const r = await fetch(`/api/score?issuer=${encodeURIComponent(issuer)}&currency=${encodeURIComponent(currency)}`);
     const d = await r.json();
@@ -198,6 +201,7 @@ async function check(issuer, currency) {
     $('err').textContent = 'Could not score that token: ' + e.message;
     $('err').style.display='block';
   } finally {
+    clearTimeout(wakingUp);
     $('go').disabled=false; $('go').textContent='Check';
   }
 }
