@@ -189,9 +189,11 @@ const $ = id => document.getElementById(id);
 async function check(issuer, currency) {
   $('err').style.display='none'; $('card').style.display='none';
   $('go').disabled=true; $('go').textContent='Checking...';
-  // Free-tier hosting can spin down when idle; a cold start can take ~30-50s.
-  // Without this, a first-time visitor just sees a hung button and assumes it's broken.
-  const wakingUp = setTimeout(() => { $('go').textContent = 'Waking up server...'; }, 4000);
+  // Two independent slow paths: a cold-started free-tier server, or a heavily-held
+  // token (e.g. SOLO has 200k+ holders -> several paginated RPC round-trips). Don't
+  // name a specific cause we can't distinguish client-side -- just say it's still going,
+  // so a first-time visitor doesn't assume a hung button means it's broken.
+  const stillGoing = setTimeout(() => { $('go').textContent = 'Still checking (live ledger data)...'; }, 4000);
   try {
     const r = await fetch(`/api/score?issuer=${encodeURIComponent(issuer)}&currency=${encodeURIComponent(currency)}`);
     const d = await r.json();
@@ -201,7 +203,7 @@ async function check(issuer, currency) {
     $('err').textContent = 'Could not score that token: ' + e.message;
     $('err').style.display='block';
   } finally {
-    clearTimeout(wakingUp);
+    clearTimeout(stillGoing);
     $('go').disabled=false; $('go').textContent='Check';
   }
 }
