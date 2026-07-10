@@ -11,12 +11,17 @@ Scoring reads XRPL *mainnet* (real tokens). The x402 payment layer settles on
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from .ledger import LedgerError
 from .scoring import list_currencies, score_token
+
+# The web UI lives in its own file (was a giant inline string): no Python quote-
+# escaping hazards, proper editor highlighting, and a cleaner diff history.
+INDEX_HTML = (Path(__file__).parent / "index.html").read_text(encoding="utf-8")
 
 app = FastAPI(title="TrustLens", version="0.2.0")
 
@@ -145,199 +150,3 @@ def healthz() -> dict:
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return INDEX_HTML
-
-
-INDEX_HTML = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>TrustLens - a trust score for XRPL tokens</title>
-<style>
-  :root { --bg:#0b1020; --card:#151b30; --line:#28304d; --text:#e7ecff; --muted:#93a0c8;
-          --good:#28c76f; --caution:#ffb020; --risky:#ff7a45; --danger:#ff4d5e; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:radial-gradient(1200px 600px at 50% -10%, #1a2340, var(--bg));
-         color:var(--text); font:16px/1.5 ui-sans-serif,system-ui,Segoe UI,Roboto,Arial; }
-  .wrap { max-width:760px; margin:0 auto; padding:48px 20px 80px; }
-  h1 { font-size:34px; margin:0 0 6px; letter-spacing:-.5px; }
-  .sub { color:var(--muted); margin:0 0 28px; }
-  form { display:flex; gap:10px; flex-wrap:wrap; }
-  input { flex:1 1 220px; padding:14px 16px; border-radius:12px; border:1px solid var(--line);
-          background:#0e142a; color:var(--text); font-size:15px; }
-  button { padding:14px 22px; border:0; border-radius:12px; background:#4c6fff; color:#fff;
-           font-weight:600; font-size:15px; cursor:pointer; }
-  button:disabled { opacity:.6; cursor:progress; }
-  .examples { margin:14px 0 0; color:var(--muted); font-size:14px; }
-  .examples a { color:#9db2ff; cursor:pointer; text-decoration:none; margin-right:12px; }
-  .card { margin-top:28px; background:var(--card); border:1px solid var(--line);
-          border-radius:18px; padding:26px; display:none; }
-  .head { display:flex; align-items:center; gap:22px; }
-  .gauge { width:104px; height:104px; border-radius:50%; display:grid; place-items:center;
-           font-size:30px; font-weight:800; flex:0 0 auto; }
-  .verdict { font-size:22px; font-weight:700; text-transform:capitalize; }
-  .name { color:var(--muted); font-size:14px; word-break:break-all; }
-  .reasons { list-style:none; padding:0; margin:22px 0 0; }
-  .reasons li { display:flex; gap:12px; padding:10px 0; border-top:1px solid var(--line); }
-  .pts { font-variant-numeric:tabular-nums; font-weight:700; min-width:42px; }
-  .sev { font-size:11px; text-transform:uppercase; letter-spacing:.5px; padding:2px 8px;
-         border-radius:999px; align-self:center; }
-  .foot { margin-top:22px; color:var(--muted); font-size:12px; }
-  .err { color:var(--danger); margin-top:18px; display:none; }
-  .badge { display:inline-block; font-size:12px; color:var(--muted); border:1px solid var(--line);
-           padding:4px 10px; border-radius:999px; margin-bottom:22px; }
-  .picker { margin-top:28px; display:none; }
-  .picker .hint { color:var(--muted); font-size:14px; margin:0 0 12px; }
-  .chip { display:inline-flex; align-items:center; gap:6px; padding:9px 14px; margin:0 8px 8px 0;
-          border-radius:10px; border:1px solid var(--line); background:#0e142a; color:var(--text);
-          font-size:14px; cursor:pointer; }
-  .chip:hover { border-color:#4c6fff; }
-  .linkrow { margin-top:16px; display:flex; align-items:center; gap:10px; }
-  .linkbtn { background:none; border:1px solid var(--line); color:var(--muted); font-size:12px;
-             padding:6px 12px; border-radius:8px; cursor:pointer; }
-  .linkbtn:hover { color:var(--text); border-color:#4c6fff; }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="badge">XRPL mainnet - read-only - no wallet needed</div>
-  <h1>TrustLens</h1>
-  <p class="sub">Paste any XRP Ledger token. Get a 0-100 trust score and the reasons behind it.</p>
-  <form id="f">
-    <input id="issuer" placeholder="Issuer address (r...)" autocomplete="off"/>
-    <input id="currency" placeholder="Currency (optional)" autocomplete="off" style="flex:0 1 220px"/>
-    <button id="go" type="submit">Check</button>
-  </form>
-  <div class="examples">
-    Try:
-    <a data-i="rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De" data-c="">RLUSD</a>
-    <a data-i="rsoLo2S1kiGeCcn6hCUXVrCpGMWLrRrLZz" data-c="">SOLO</a>
-  </div>
-  <div class="err" id="err"></div>
-  <div class="picker" id="picker">
-    <p class="hint" id="pickerHint"></p>
-    <div id="pickerChips"></div>
-  </div>
-  <div class="card" id="card">
-    <div class="head">
-      <div class="gauge" id="gauge">--</div>
-      <div>
-        <div class="verdict" id="verdict"></div>
-        <div class="name" id="name"></div>
-      </div>
-    </div>
-    <ul class="reasons" id="reasons"></ul>
-    <div class="foot" id="foot"></div>
-    <div class="linkrow">
-      <button class="linkbtn" id="copyLink" type="button">Copy link to this result</button>
-      <span class="linkbtn" id="copied" style="display:none; border:none; cursor:default;">Copied!</span>
-    </div>
-  </div>
-</div>
-<script>
-const COLORS = { trusted:'#28c76f', caution:'#ffb020', risky:'#ff7a45', danger:'#ff4d5e' };
-const SEVBG  = { good:'#153a27', low:'#33351d', medium:'#3a2a1a', high:'#3a1d20', critical:'#45161c' };
-const $ = id => document.getElementById(id);
-
-async function check(issuer, currency) {
-  $('err').style.display='none'; $('card').style.display='none'; $('picker').style.display='none';
-  $('go').disabled=true; $('go').textContent='Checking...';
-  // Two independent slow paths: a cold-started free-tier server, or a heavily-held
-  // token (e.g. SOLO has 200k+ holders -> several paginated RPC round-trips). Don't
-  // name a specific cause we can't distinguish client-side -- just say it's still going,
-  // so a first-time visitor doesn't assume a hung button means it's broken.
-  const stillGoing = setTimeout(() => { $('go').textContent = 'Still checking (live ledger data)...'; }, 4000);
-  try {
-    const q = currency
-      ? `issuer=${encodeURIComponent(issuer)}&currency=${encodeURIComponent(currency)}`
-      : `issuer=${encodeURIComponent(issuer)}`;
-    const r = await fetch(`/api/score?${q}`);
-    const d = await r.json();
-    if (d.detail) throw new Error(typeof d.detail==='string'?d.detail:'Bad request');
-    if (d.disambiguation) { renderPicker(issuer, d.currencies); return; }
-    $('issuer').value = issuer; $('currency').value = d.currency_name;
-    render(d);
-  } catch(e) {
-    $('err').textContent = 'Could not score that token: ' + e.message;
-    $('err').style.display='block';
-  } finally {
-    clearTimeout(stillGoing);
-    $('go').disabled=false; $('go').textContent='Check';
-  }
-}
-
-function renderPicker(issuer, currencies) {
-  $('pickerHint').textContent =
-    `This address issues ${currencies.length} different tokens. Which one?`;
-  const box = $('pickerChips'); box.innerHTML = '';
-  for (const c of currencies) {
-    const b = document.createElement('button');
-    b.className = 'chip'; b.type = 'button'; b.textContent = c.currency_name;
-    b.addEventListener('click', () => check(issuer, c.currency));
-    box.appendChild(b);
-  }
-  $('picker').style.display = 'block';
-}
-
-function render(d) {
-  const c = COLORS[d.verdict] || '#4c6fff';
-  const g = $('gauge');
-  g.textContent = d.score;
-  g.style.background = `conic-gradient(${c} ${d.score*3.6}deg, #0e142a 0)`;
-  g.style.color = c;
-  $('verdict').textContent = d.verdict;
-  $('verdict').style.color = c;
-  $('name').textContent = `${d.currency_name}  -  ${d.issuer}`;
-  const ul = $('reasons'); ul.innerHTML='';
-  for (const rs of d.reasons) {
-    const li = document.createElement('li');
-    const sign = rs.points>=0 ? '+' : '';
-    const col = rs.points>=0 ? '#28c76f' : '#ff7a45';
-    li.innerHTML = `<span class="pts" style="color:${col}">${sign}${rs.points}</span>`
-      + `<span class="sev" style="background:${SEVBG[rs.severity]||'#222'}">${rs.severity}</span>`
-      + `<span>${rs.label}</span>`;
-    ul.appendChild(li);
-  }
-  $('foot').textContent = d.disclaimer;
-  $('card').style.display='block';
-
-  // Make the exact result shareable/deep-linkable without a page reload.
-  const url = new URL(location.href);
-  url.searchParams.set('issuer', d.issuer);
-  url.searchParams.set('currency', d.currency_name);
-  history.replaceState(null, '', url);
-  $('copyLink').onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(url.toString());
-      $('copied').textContent = 'Copied!';
-    } catch (e) {
-      // Clipboard API can be blocked (permissions, embedding context, older browsers) --
-      // fall back to a manual-copy prompt instead of the button silently doing nothing.
-      window.prompt('Copy this link:', url.toString());
-      return;
-    }
-    $('copied').style.display = 'inline'; $('copyLink').style.display = 'none';
-    setTimeout(() => { $('copied').style.display = 'none'; $('copyLink').style.display = 'inline'; }, 2000);
-  };
-}
-
-$('f').addEventListener('submit', e => {
-  e.preventDefault();
-  const i=$('issuer').value.trim(), c=$('currency').value.trim();
-  if (i) check(i, c);
-});
-document.querySelectorAll('.examples a').forEach(a => a.addEventListener('click', () => {
-  $('issuer').value=a.dataset.i; $('currency').value=a.dataset.c; check(a.dataset.i, a.dataset.c);
-}));
-
-// Deep link: /?issuer=...&currency=... loads pre-filled and auto-runs, so a link
-// shared from X (or the "Copy link to this result" button above) lands on the
-// actual scored result instead of an empty form.
-(() => {
-  const p = new URLSearchParams(location.search);
-  const i = p.get('issuer'), c = p.get('currency') || '';
-  if (i) { $('issuer').value = i; $('currency').value = c; check(i, c); }
-})();
-</script>
-</body>
-</html>"""
