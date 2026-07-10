@@ -29,12 +29,19 @@ def mock_ledger(*, flags, domain=None, regular_key=False, signer_list=False,
     if signer_list:
         account_data["signer_lists"] = [{"SignerEntries": [{"SignerEntry": {}}]}]
 
-    ledger.account_info = lambda issuer: {"account_data": account_data, "account_flags": flags}
-    ledger.gateway_balances = lambda issuer: {"obligations": {currency: str(supply)}}
-    ledger.account_lines = lambda issuer, cur, **kw: {
+    # Real signatures now take an optional ledger_index (pinned by score_token to
+    # avoid the cross-node pagination drift found 2026-07-10); mocks accept and
+    # ignore it so they match without asserting on the exact value passed.
+    ledger.account_info = lambda issuer: {
+        "account_data": account_data, "account_flags": flags, "ledger_index": 999,
+    }
+    ledger.gateway_balances = lambda issuer, ledger_index="validated": {
+        "obligations": {currency: str(supply)}
+    }
+    ledger.account_lines = lambda issuer, cur, ledger_index="validated", **kw: {
         "balances": holders if holders is not None else [], "capped": False
     }
-    ledger.amm_info = lambda issuer, cur: (
+    ledger.amm_info = lambda issuer, cur, ledger_index="validated": (
         {"amount": str(int(amm_xrp * 1_000_000))} if amm_xrp else None
     )
 

@@ -12,12 +12,27 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from .ledger import LedgerError
 from .scoring import list_currencies, score_token
 
 app = FastAPI(title="TrustLens", version="0.2.0")
+
+
+@app.exception_handler(LedgerError)
+def ledger_error_handler(request: Request, exc: LedgerError) -> JSONResponse:
+    """All public XRPL RPC endpoints transiently failed for this request.
+
+    Better to say so honestly than to let it surface as an opaque 500, and
+    definitely better than any code path that could mistake "the ledger didn't
+    answer" for "this token doesn't exist" (see ledger.py's _TRANSIENT_RPC_ERRORS).
+    """
+    return JSONResponse(
+        {"detail": "Live XRPL data is temporarily unavailable. Please try again."},
+        status_code=503,
+    )
 
 # --- x402 paid tier -------------------------------------------------------------
 # Reuses the proven x402-xrpl flow from x402-sandbox. Testnet merchant + facilitator.

@@ -137,6 +137,13 @@ def score_token(issuer: str, currency: str) -> TokenScore:
             facts={"account_error": info.get("error")},
         )
 
+    # Pin every remaining lookup in this call to the exact ledger account_info just
+    # resolved. xrplcluster.com load-balances across many nodes; without this, each
+    # subsequent call independently re-resolves "validated" against whichever node
+    # answers it, and since the ledger advances every ~3-5s that's a moving target --
+    # confirmed live to silently truncate pagination and drop the AMM lookup entirely.
+    pinned_ledger = info.get("ledger_index", "validated")
+
     account_data = info.get("account_data", {})
     flags = info.get("account_flags", {})
     domain_hex = account_data.get("Domain")
@@ -291,7 +298,7 @@ def score_token(issuer: str, currency: str) -> TokenScore:
     impersonation_candidate = currency_name.upper() in IMPERSONATION_NAMES and not domain_verified
 
     # --- Supply distribution & holders ---
-    gb = ledger.gateway_balances(issuer)
+    gb = ledger.gateway_balances(issuer, pinned_ledger)
     obligations = gb.get("obligations", {}) or {}
     supply = None
     try:
@@ -300,7 +307,18 @@ def score_token(issuer: str, currency: str) -> TokenScore:
         supply = None
     facts["circulating_supply"] = supply
 
-    lines = ledger.account_lines(issuer, currency)
+    # Public XRPL RPC infra can still return an inconsistent (usually truncated,
+    # never fabricated) trustline walk even with a pinned ledger + sticky endpoint
+    # (confirmed live 2026-07-10: repeated identical calls varied 260/785/1546+
+    # holders for the same real token, with no error signal to retry on). A walk
+    # can only ever UNDER-count real holders, never invent extra ones, so one retry
+    # and keeping whichever attempt found more is a cheap, defensible bias toward
+    # the more-complete answer -- not a guarantee, but meaningfully better than one
+    # shot. If this keeps mattering, the real fix is a dedicated/paid RPC provider.
+    lines = ledger.account_lines(issuer, currency, pinned_ledger)
+    retry = ledger.account_lines(issuer, currency, pinned_ledger)
+    if len(retry["balances"]) > len(lines["balances"]):
+        lines = retry
     balances = lines["balances"]
     holder_count = len(balances)
     facts["holder_count"] = holder_count if not lines["capped"] else f"{holder_count}+"
@@ -371,7 +389,7 @@ def score_token(issuer: str, currency: str) -> TokenScore:
             )
 
     # --- Liquidity: is there an AMM pool to exit into? ---
-    amm = ledger.amm_info(issuer, currency)
+    amm = ledger.amm_info(issuer, currency, pinned_ledger)
     if amm:
         try:
             xrp_side = amm.get("amount")
