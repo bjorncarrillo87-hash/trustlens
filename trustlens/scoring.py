@@ -169,15 +169,53 @@ def score_token(issuer: str, currency: str) -> TokenScore:
         except ValueError:
             domain = None
     facts["domain"] = domain
-    domain_verified = bool(domain)  # MVP: a domain is set. Full xrp-ledger.toml check is a later pass.
+
+    # A Domain field alone proves nothing -- anyone can set it to any string,
+    # including a domain they don't own. Real verification requires that domain's
+    # own xrp-ledger.toml to list this exact address back (a two-way link only the
+    # real domain owner can produce). Every downstream "verified identity" benefit
+    # below (softer clawback treatment, multisig-governance credit, impersonation
+    # exemption, softer concentration weighting) now requires that real proof, not
+    # just a bare Domain field -- previously any of those could be unlocked by
+    # setting Domain to literally any string, including one the issuer never owned.
+    toml_result: bool | None = ledger.verify_toml_domain(domain, issuer) if domain else None
+    facts["domain_toml_verified"] = toml_result
+    domain_verified = toml_result is True
+
     if domain_verified:
-        score += 8
+        score += 10
         reasons.append(
             Reason(
-                "domain_set",
-                f"Issuer publishes a domain ({domain}) linking an off-ledger identity.",
+                "domain_verified",
+                f"Issuer's domain ({domain}) publishes an xrp-ledger.toml file that verifies "
+                "this exact address - a real, two-way-confirmed identity link.",
                 "good",
-                8,
+                10,
+            )
+        )
+    elif domain and toml_result is False:
+        score -= 10
+        reasons.append(
+            Reason(
+                "domain_unverified",
+                f"Issuer publishes a domain ({domain}), but it does NOT verify this address "
+                "(no matching xrp-ledger.toml entry) - the domain doesn't confirm ownership.",
+                "high",
+                -10,
+            )
+        )
+    elif domain:
+        # toml_result is None: couldn't determine (our network/timeout/parse issue),
+        # not a signal about the issuer. Smaller partial credit either way rather
+        # than fully rewarding or punishing based on our own connectivity.
+        score += 4
+        reasons.append(
+            Reason(
+                "domain_set_unverifiable",
+                f"Issuer publishes a domain ({domain}), but its xrp-ledger.toml could not be "
+                "checked right now - verification incomplete, not necessarily suspicious.",
+                "low",
+                4,
             )
         )
     else:
@@ -191,105 +229,6 @@ def score_token(issuer: str, currency: str) -> TokenScore:
             )
         )
 
-    # --- Issuer control: can they mint more or move the rug? ---
-    disabled_master = bool(flags.get("disableMasterKey"))
-    blackholed = disabled_master and not has_regular_key and not has_signer_list
-    facts["blackholed"] = bool(blackholed)
-    facts["multisig_issuer"] = bool(has_signer_list)
-    if blackholed:
-        score += 22
-        reasons.append(
-            Reason(
-                "issuer_blackholed",
-                "Issuer is blackholed (master key disabled, no regular key or signer list): "
-                "supply is fixed and the issuer can no longer sign transactions.",
-                "good",
-                22,
-            )
-        )
-    elif disabled_master and has_signer_list and domain_verified:
-        score += 8
-        reasons.append(
-            Reason(
-                "issuer_governed_multisig",
-                "Master key is disabled and the account is governed by a multisig under a "
-                "verified identity - an accountable, institutional-style setup.",
-                "good",
-                8,
-            )
-        )
-    elif domain_verified:
-        score -= 3
-        reasons.append(
-            Reason(
-                "issuer_active_verified",
-                "Issuer can still sign and mint more supply, but publishes a verified "
-                "identity - normal for a managed stablecoin.",
-                "low",
-                -3,
-            )
-        )
-    else:
-        score -= 14
-        reasons.append(
-            Reason(
-                "issuer_active_anon",
-                "Anonymous issuer can still sign and mint more supply at will: "
-                "infinite-mint / rug risk.",
-                "high",
-                -14,
-            )
-        )
-
-    # --- Freeze / clawback: can the issuer seize or lock holders' tokens? ---
-    if flags.get("globalFreeze"):
-        score -= 30
-        reasons.append(
-            Reason(
-                "global_freeze_on",
-                "Global Freeze is currently ON: holders cannot trade this token right now.",
-                "critical",
-                -30,
-            )
-        )
-    if flags.get("noFreeze"):
-        score += 8
-        reasons.append(
-            Reason(
-                "no_freeze",
-                "Issuer has permanently given up the ability to freeze this token (NoFreeze).",
-                "good",
-                8,
-            )
-        )
-
-    # Clawback is expected/legitimate for a domain-verified regulated stablecoin,
-    # but on an anonymous token it means the issuer can seize your balance.
-    clawback = flags.get("allowTrustLineClawback")
-    facts["clawback_enabled"] = bool(clawback)
-    if clawback:
-        if domain_verified:
-            score -= 3
-            reasons.append(
-                Reason(
-                    "clawback_verified_issuer",
-                    "Issuer can claw back tokens, but publishes a domain - typical of a "
-                    "regulated stablecoin rather than a scam.",
-                    "low",
-                    -3,
-                )
-            )
-        else:
-            score -= 16
-            reasons.append(
-                Reason(
-                    "clawback_anon_issuer",
-                    "Issuer can claw back (seize) your tokens and publishes no domain.",
-                    "high",
-                    -16,
-                )
-            )
-
     # An impersonation *name* alone isn't enough to convict: a fresh drainer with 2
     # holders and no liquidity is a very different animal from a long-running,
     # widely-held, liquid token that simply never set an on-chain Domain flag (common
@@ -297,7 +236,8 @@ def score_token(issuer: str, currency: str) -> TokenScore:
     # holder/liquidity footprint is known (below) before deciding how hard to penalize.
     impersonation_candidate = currency_name.upper() in IMPERSONATION_NAMES and not domain_verified
 
-    # --- Supply distribution & holders ---
+    # --- Supply distribution & holders (moved ahead of issuer-control/clawback so
+    # both can use `established`, below, the same way impersonation already did) ---
     gb = ledger.gateway_balances(issuer, pinned_ledger)
     obligations = gb.get("obligations", {}) or {}
     supply = None
@@ -430,12 +370,179 @@ def score_token(issuer: str, currency: str) -> TokenScore:
             )
         )
 
+    # A token with a real, wide holder base and real liquidity is very hard for a
+    # fresh drainer to fake -- every actual scam found in this codebase's own
+    # scam-hunt (2026-07-09) had 1-2 holders and zero liquidity, no exceptions.
+    # Real usage this substantial is itself meaningful evidence, independent of
+    # whether a domain happens to be cryptographically verified yet. Used below
+    # by issuer-control, clawback, AND impersonation (previously each computed
+    # this -- or an inconsistent version of it -- separately).
+    established = holder_count >= 50 or lines["capped"] or facts["amm_xrp_liquidity"] >= 500
+
+    # --- Issuer control: can they mint more or move the rug? ---
+    disabled_master = bool(flags.get("disableMasterKey"))
+    blackholed = disabled_master and not has_regular_key and not has_signer_list
+    facts["blackholed"] = bool(blackholed)
+    facts["multisig_issuer"] = bool(has_signer_list)
+    if blackholed:
+        score += 22
+        reasons.append(
+            Reason(
+                "issuer_blackholed",
+                "Issuer is blackholed (master key disabled, no regular key or signer list): "
+                "supply is fixed and the issuer can no longer sign transactions.",
+                "good",
+                22,
+            )
+        )
+    elif disabled_master and has_signer_list and domain_verified:
+        score += 8
+        reasons.append(
+            Reason(
+                "issuer_governed_multisig",
+                "Master key is disabled and the account is governed by a multisig under a "
+                "verified identity - an accountable, institutional-style setup.",
+                "good",
+                8,
+            )
+        )
+    elif domain_verified:
+        score -= 3
+        reasons.append(
+            Reason(
+                "issuer_active_verified",
+                "Issuer can still sign and mint more supply, but publishes a verified "
+                "identity - normal for a managed stablecoin.",
+                "low",
+                -3,
+            )
+        )
+    elif domain and toml_result is None:
+        # Domain set but we genuinely couldn't determine ownership (no toml published
+        # at all -- common even for legitimate businesses, confirmed live: Circle's
+        # own USDC issuer domain has no such file). Deliberately NOT the same
+        # treatment as `toml_result is False` (a domain that HAS a real toml but
+        # explicitly doesn't list this address -- actual evidence of a mismatch,
+        # which stays in the harsher anon-equivalent tier below). Treating "couldn't
+        # check" the same as fully anonymous overcorrected known-good real gateways
+        # (USDC/USDT/SOLO) into "risky"/"danger" once the domain block stopped
+        # giving free credit for a merely-set field.
+        score -= 8
+        reasons.append(
+            Reason(
+                "issuer_active_domain_unverified",
+                "Issuer can still sign and mint more supply; publishes a domain but it "
+                "isn't cryptographically verified - moderate risk, between anonymous "
+                "and proven.",
+                "medium",
+                -8,
+            )
+        )
+    elif established and toml_result is not False:
+        # No domain at all, but real usage a fresh drainer couldn't fake. NOT
+        # reached when toml_result is False (a PROVEN mismatch) -- actual evidence
+        # the issuer lied about a specific domain is a stronger red flag than merely
+        # lacking any claim, and shouldn't be forgiven just because the token also
+        # has real holders/liquidity.
+        score -= 8
+        reasons.append(
+            Reason(
+                "issuer_active_established_footprint",
+                "Issuer can still sign and mint more supply and publishes no domain, but "
+                "real usage (holders/liquidity) is inconsistent with a fresh drainer - "
+                "moderate risk, still verify independently.",
+                "medium",
+                -8,
+            )
+        )
+    else:
+        score -= 14
+        reasons.append(
+            Reason(
+                "issuer_active_anon",
+                "Anonymous issuer can still sign and mint more supply at will: "
+                "infinite-mint / rug risk.",
+                "high",
+                -14,
+            )
+        )
+
+    # --- Freeze / clawback: can the issuer seize or lock holders' tokens? ---
+    if flags.get("globalFreeze"):
+        score -= 30
+        reasons.append(
+            Reason(
+                "global_freeze_on",
+                "Global Freeze is currently ON: holders cannot trade this token right now.",
+                "critical",
+                -30,
+            )
+        )
+    if flags.get("noFreeze"):
+        score += 8
+        reasons.append(
+            Reason(
+                "no_freeze",
+                "Issuer has permanently given up the ability to freeze this token (NoFreeze).",
+                "good",
+                8,
+            )
+        )
+
+    # Clawback is expected/legitimate for a domain-verified regulated stablecoin,
+    # but on an anonymous token it means the issuer can seize your balance.
+    clawback = flags.get("allowTrustLineClawback")
+    facts["clawback_enabled"] = bool(clawback)
+    if clawback:
+        if domain_verified:
+            score -= 3
+            reasons.append(
+                Reason(
+                    "clawback_verified_issuer",
+                    "Issuer can claw back tokens, but publishes a domain - typical of a "
+                    "regulated stablecoin rather than a scam.",
+                    "low",
+                    -3,
+                )
+            )
+        elif domain and toml_result is None:
+            score -= 9
+            reasons.append(
+                Reason(
+                    "clawback_domain_unverified",
+                    "Issuer can claw back tokens; publishes a domain but it isn't "
+                    "cryptographically verified - moderate risk.",
+                    "medium",
+                    -9,
+                )
+            )
+        elif established and toml_result is not False:
+            score -= 9
+            reasons.append(
+                Reason(
+                    "clawback_established_footprint",
+                    "Issuer can claw back tokens and publishes no domain, but real usage "
+                    "(holders/liquidity) is inconsistent with a fresh drainer - moderate risk.",
+                    "medium",
+                    -9,
+                )
+            )
+        else:
+            score -= 16
+            reasons.append(
+                Reason(
+                    "clawback_anon_issuer",
+                    "Issuer can claw back (seize) your tokens and publishes no domain.",
+                    "high",
+                    -16,
+                )
+            )
+
     # --- Impersonation, resolved: penalize hardest when the footprint looks like a
     # fresh drainer (thin holders, no real liquidity); soften when the token shows
     # real usage a 2-holder scam would never have, while still flagging the missing
     # on-chain identity proof. ---
     if impersonation_candidate:
-        established = holder_count >= 50 or lines["capped"] or facts["amm_xrp_liquidity"] >= 500
         if established:
             score -= 10
             reasons.append(

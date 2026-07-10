@@ -7,6 +7,7 @@ deliberate: scoring a token must never be able to touch funds.
 from __future__ import annotations
 
 import time
+import tomllib
 from typing import Any
 
 import requests
@@ -182,3 +183,73 @@ def amm_info(issuer: str, currency: str, ledger_index: int | str = "validated") 
     if result.get("error"):
         return None
     return result.get("amm")
+
+
+_TOML_TIMEOUT = 8
+
+
+def verify_toml_domain(domain: str, issuer: str) -> bool | None:
+    """Check whether ``domain`` actually claims ``issuer`` back.
+
+    An account's on-chain Domain field alone proves nothing -- anyone can set it
+    to any string, including a domain they don't own. Real verification (per
+    https://xrpl.org/docs/references/xrp-ledger-toml) requires that domain's own
+    https://{domain}/.well-known/xrp-ledger.toml to list this exact address back
+    -- a two-way link only the domain's real owner can produce.
+
+    Returns True (verified), False (the file exists, parsed, and lists other
+    accounts/issuers but not this one -- a real, meaningful non-match), or None
+    (no evidence either way: missing file, network/timeout/parse error, or a file
+    with nothing checkable in it). A missing file is deliberately NOT treated as
+    a negative signal -- confirmed live 2026-07-10 that even Circle's real USDC
+    issuer domain 404s here; most legitimate issuers simply haven't adopted this
+    optional standard, so treating "absent" the same as "actively lying" would
+    punish real businesses, not just scammers.
+    """
+    host = domain.strip()
+    for prefix in ("https://", "http://"):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+    host = host.split("/", 1)[0].strip()
+    if not host:
+        return None
+
+    try:
+        resp = requests.get(f"https://{host}/.well-known/xrp-ledger.toml", timeout=_TOML_TIMEOUT)
+    except Exception:  # noqa: BLE001 - our fetch failing isn't evidence about the issuer
+        return None
+    if resp.status_code != 200:
+        return None
+
+    try:
+        data = tomllib.loads(resp.text)
+    except Exception:  # noqa: BLE001 - malformed file: can't determine, don't guess
+        return None
+
+    # The officially documented spec only covers [[ACCOUNTS]] (address=) and
+    # [[CURRENCIES]] (issuer=), but real issuers in practice also use undocumented
+    # [[ISSUERS]] (address=) and [[TOKENS]] (issuer=) tables -- confirmed live:
+    # ripple.com's own toml lists RLUSD's issuer under [[ISSUERS]]/[[TOKENS]], NOT
+    # [[ACCOUNTS]]. Checking only the documented section would fail to verify
+    # Ripple's own stablecoin. Accept a match in any of the four.
+    tables = [
+        (data.get("ACCOUNTS"), "address"),
+        (data.get("CURRENCIES"), "issuer"),
+        (data.get("ISSUERS"), "address"),
+        (data.get("TOKENS"), "issuer"),
+    ]
+    saw_checkable_entry = False
+    for entries, field in tables:
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            saw_checkable_entry = True
+            if entry.get(field) == issuer:
+                return True
+
+    # File exists and parsed. If it lists other accounts/issuers but not this one,
+    # that's a real non-match. If it has nothing checkable at all (e.g. only
+    # [[VALIDATORS]]), we have no evidence either way -- don't guess.
+    return False if saw_checkable_entry else None
