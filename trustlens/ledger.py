@@ -6,6 +6,8 @@ deliberate: scoring a token must never be able to touch funds.
 """
 from __future__ import annotations
 
+import ipaddress
+import socket
 import time
 import tomllib
 from typing import Any
@@ -186,6 +188,46 @@ def amm_info(issuer: str, currency: str, ledger_index: int | str = "validated") 
 
 
 _TOML_TIMEOUT = 8
+_TOML_MAX_BYTES = 512 * 1024  # generous for a real toml (ripple.com's own is ~4KB)
+
+
+def _resolves_to_public_address(host: str) -> bool:
+    """Refuse to fetch a domain whose hostname resolves to a private/internal address.
+
+    ``domain`` is on-chain data an issuer sets on their OWN account -- effectively
+    attacker-controlled input, since anyone can create an issuer account and set
+    Domain to anything. Fetching it unconditionally is a classic SSRF vector: an
+    attacker could point Domain at a cloud metadata endpoint, localhost, or an
+    internal-only service, using this public, unauthenticated scoring endpoint as
+    a proxy into infrastructure it should never be able to reach. Resolve first
+    and refuse anything that isn't a normal public address.
+
+    Known gap, accepted rather than over-engineered for a read-only scoring tool:
+    this doesn't defend against DNS rebinding (a different IP being returned
+    between this check and the actual request) -- a fully airtight fix would
+    resolve once and connect directly to the pinned IP. Standard resolve-then-
+    check is the proportionate mitigation here, not a guarantee.
+    """
+    try:
+        infos = socket.getaddrinfo(host, 443)
+    except Exception:  # noqa: BLE001 - can't resolve -> can't fetch either way
+        return False
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_reserved
+            or addr.is_multicast
+            or addr.is_unspecified
+        ):
+            return False
+    return bool(infos)
 
 
 def verify_toml_domain(domain: str, issuer: str) -> bool | None:
@@ -213,16 +255,44 @@ def verify_toml_domain(domain: str, issuer: str) -> bool | None:
     host = host.split("/", 1)[0].strip()
     if not host:
         return None
+    if not _resolves_to_public_address(host):
+        return None
 
     try:
-        resp = requests.get(f"https://{host}/.well-known/xrp-ledger.toml", timeout=_TOML_TIMEOUT)
+        # allow_redirects=False deliberately: a redirect target isn't re-checked
+        # against _resolves_to_public_address, so following one would reopen the
+        # SSRF gap the resolve-first check above exists to close. A handful of
+        # real domains that redirect apex->www (confirmed live: circle.com does
+        # this) will read as unverifiable rather than checked -- an acceptable,
+        # safe default given the existing "unverifiable is neutral" design.
+        resp = requests.get(
+            f"https://{host}/.well-known/xrp-ledger.toml",
+            timeout=_TOML_TIMEOUT,
+            allow_redirects=False,
+            stream=True,
+        )
     except Exception:  # noqa: BLE001 - our fetch failing isn't evidence about the issuer
         return None
     if resp.status_code != 200:
         return None
 
+    declared_length = resp.headers.get("Content-Length")
+    if declared_length and declared_length.isdigit() and int(declared_length) > _TOML_MAX_BYTES:
+        return None  # declares itself too big to be a real toml file -- don't fetch it
+
     try:
-        data = tomllib.loads(resp.text)
+        body = resp.raw.read(_TOML_MAX_BYTES + 1, decode_content=True)
+    except Exception:  # noqa: BLE001
+        return None
+    if len(body) > _TOML_MAX_BYTES:
+        return None  # oversized/streaming response -- refuse rather than buffer it all
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+    try:
+        data = tomllib.loads(text)
     except Exception:  # noqa: BLE001 - malformed file: can't determine, don't guess
         return None
 
