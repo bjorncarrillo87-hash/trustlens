@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from .scoring import list_currencies, score_token
 
-app = FastAPI(title="TrustLens", version="0.1.0")
+app = FastAPI(title="TrustLens", version="0.2.0")
 
 # --- x402 paid tier -------------------------------------------------------------
 # Reuses the proven x402-xrpl flow from x402-sandbox. Testnet merchant + facilitator.
