@@ -142,7 +142,10 @@ def well_known_x402() -> JSONResponse:
     )
 
 
-@app.get("/healthz")
+# GET + HEAD: uptime monitors (e.g. UptimeRobot) default to HEAD probes, and
+# FastAPI does NOT auto-accept HEAD on GET-only routes -- a HEAD-only monitor was
+# reading a healthy service as "405 / down" (found live 2026-07-13).
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 def healthz() -> dict:
     return {"ok": True, "x402": X402_ENABLED}
 
