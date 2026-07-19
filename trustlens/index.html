@@ -149,15 +149,41 @@
 
   .head { display: flex; align-items: center; gap: 26px; flex-wrap: wrap; }
   .gauge-wrap { position: relative; width: 128px; height: 128px; flex: 0 0 auto; }
-  .gauge-wrap svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  /* Ambient glow lives on its own soft, evenly-blurred circle BEHIND the ring --
+     not a filter:drop-shadow on the ring itself. drop-shadow follows the exact
+     stroked arc path (including the rounded linecap), which reads as a lumpy,
+     muddy smear rather than a clean halo -- most visible on amber/caution,
+     flagged as "ugly" 2026-07-14. This gives a smooth glow regardless of arc angle. */
+  .gauge-wrap::before { content: ""; position: absolute; inset: 14%; border-radius: 50%;
+    background: var(--vc); filter: blur(20px); opacity: .3; z-index: -1;
+    transition: background-color .3s, opacity .3s; }
+  .gauge-wrap svg { width: 100%; height: 100%; transform: rotate(-90deg); position: relative; z-index: 1; }
   .gauge-wrap .track { fill: none; stroke: rgba(124,146,255,.12); stroke-width: 9; }
   .gauge-wrap .ring { fill: none; stroke: var(--vc); stroke-width: 9; stroke-linecap: round;
-    filter: drop-shadow(0 0 10px var(--vc));
-    transition: stroke-dashoffset 1.1s cubic-bezier(.25,.8,.3,1); }
-  .gauge-center { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
+    transition: stroke-dashoffset 1.1s cubic-bezier(.25,.8,.3,1), stroke .3s; }
+  .gauge-center { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; z-index: 1; }
   .gauge-center .num { font-size: 37px; font-weight: 800; letter-spacing: -1px; color: var(--vc); line-height: 1;
-    font-variant-numeric: tabular-nums; text-shadow: 0 0 22px color-mix(in srgb, var(--vc) 45%, transparent); }
+    font-variant-numeric: tabular-nums; text-shadow: 0 0 14px color-mix(in srgb, var(--vc) 35%, transparent); }
   .gauge-center .of { font-size: 11px; color: var(--dim); margin-top: 3px; letter-spacing: 1px; }
+
+  /* ---------- loading state: indeterminate spinning arc, shown the instant Scan
+     is pressed, before the (single, atomic) API response comes back ---------- */
+  .gauge-wrap.loading::before { opacity: .14; }
+  .gauge-wrap.loading .ring { stroke: var(--accent); stroke-dasharray: 58 269; stroke-dashoffset: 0;
+    transition: none; transform-box: fill-box; transform-origin: center; animation: gaugespin 1s linear infinite; }
+  @keyframes gaugespin { to { transform: rotate(360deg); } }
+  .gauge-center .num.pulse { color: var(--dim); animation: pulse 1.3s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: .35; } 50% { opacity: .9; } }
+
+  /* ---------- skeleton placeholders: content structure appears immediately,
+     values shimmer in place until the real response arrives ---------- */
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+  .skel { display: inline-block; height: .95em; border-radius: 5px; vertical-align: -0.15em;
+    background: linear-gradient(100deg, rgba(124,146,255,.10) 30%, rgba(124,146,255,.24) 50%, rgba(124,146,255,.10) 70%);
+    background-size: 250% 100%; animation: shimmer 1.5s ease-in-out infinite; }
+
+  @keyframes itemin { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
+  .itemin { animation: itemin .42s cubic-bezier(.2,.9,.25,1) both; }
 
   .headtext { flex: 1 1 260px; min-width: 0; }
   .verdict-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px;
@@ -214,6 +240,9 @@
   @media (prefers-reduced-motion: reduce) {
     .orb, .card.reveal, .card.reveal::after { animation: none !important; }
     .gauge-wrap .ring, .rbar i { transition: none !important; }
+    .gauge-wrap.loading .ring, .gauge-center .num.pulse, .skel, .itemin { animation: none !important; }
+    .itemin { opacity: 1 !important; transform: none !important; }
+    .skel { opacity: .35; }
   }
 </style>
 </head>
@@ -326,9 +355,60 @@ const $ = id => document.getElementById(id);
 const RING_C = 2 * Math.PI * 52; // circumference of the r=52 gauge ring
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+// The API returns one atomic JSON response -- score_token() computes everything
+// together server-side (several reasons share the SAME upstream data, e.g. the
+// "established" footprint feeds issuer-control, clawback, AND impersonation, so
+// they can't resolve independently). This skeleton is a client-side reveal over
+// that single response, not literal per-field backend streaming -- it's honest
+// about that in the code, even though the effect is the "system is thinking"
+// feel Bjorn asked for. True field-level streaming would need restructuring the
+// scoring engine into independently-resolvable pieces (real project, not a UI tweak).
+const STAT_LABELS = ['Holders', 'AMM liquidity', 'Top holder', 'Identity'];
+const SKELETON_REASON_ROWS = 4;
+
+function showSkeleton(issuer, currency) {
+  $('picker').style.display = 'none';
+  $('feats').style.display = 'none';
+
+  const gw = document.querySelector('.gauge-wrap');
+  gw.classList.add('loading');
+  const num = $('gaugeNum');
+  num.textContent = '·'; num.classList.add('pulse');
+  $('ring').style.strokeDasharray = ''; $('ring').style.strokeDashoffset = '';
+
+  $('verdict').style.visibility = 'hidden'; // shape reserved, avoids a layout jump on reveal
+  $('tokname').innerHTML = currency ? currency : '<span class="skel" style="width:9em"></span>';
+  $('issuerLine').textContent = issuer; // we already have this -- no reason to hide it
+
+  const stats = $('stats'); stats.innerHTML = '';
+  for (const label of STAT_LABELS) {
+    const div = document.createElement('div');
+    div.className = 'stat';
+    div.innerHTML = `<div class="k">${label}</div><div class="v"><span class="skel" style="width:4.5em"></span></div>`;
+    stats.appendChild(div);
+  }
+
+  const ul = $('reasons'); ul.innerHTML = '';
+  for (let i = 0; i < SKELETON_REASON_ROWS; i++) {
+    const li = document.createElement('li');
+    li.innerHTML =
+      `<span class="skel" style="width:100%;height:20px;border-radius:999px"></span>` +
+      `<span class="skel" style="width:${70 - i * 8}%"></span>` +
+      `<span class="rmeter"><span class="skel" style="width:74px;height:5px"></span>` +
+      `<span class="skel" style="width:28px"></span></span>`;
+    ul.appendChild(li);
+  }
+
+  $('foot').textContent = '';
+  const card = $('card');
+  card.style.display = 'block';
+  card.classList.remove('reveal'); void card.offsetWidth; card.classList.add('reveal');
+}
+
 async function check(issuer, currency) {
-  $('err').style.display='none'; $('card').style.display='none'; $('picker').style.display='none';
+  $('err').style.display='none'; $('picker').style.display='none';
   $('go').disabled=true; $('go').textContent='Scanning…';
+  showSkeleton(issuer, currency);
   // Two independent slow paths: a cold-started free-tier server, or a heavily-held
   // token (e.g. SOLO has 200k+ holders -> several paginated RPC round-trips). Don't
   // name a specific cause we can't distinguish client-side -- just say it's still going,
@@ -341,11 +421,11 @@ async function check(issuer, currency) {
     const r = await fetch(`/api/score?${q}`);
     const d = await r.json();
     if (d.detail) throw new Error(typeof d.detail==='string'?d.detail:'Bad request');
-    if (d.disambiguation) { renderPicker(issuer, d.currencies); return; }
+    if (d.disambiguation) { $('card').style.display='none'; renderPicker(issuer, d.currencies); return; }
     $('issuer').value = issuer; $('currency').value = d.currency_name;
     render(d);
   } catch(e) {
-    $('feats').style.display='none';
+    $('card').style.display='none';
     $('err').textContent = 'Could not score that token: ' + e.message;
     $('err').style.display='block';
   } finally {
@@ -402,6 +482,11 @@ function render(d) {
   const card = $('card');
   card.style.setProperty('--vc', c);
 
+  // leave the loading/skeleton state
+  document.querySelector('.gauge-wrap').classList.remove('loading');
+  $('gaugeNum').classList.remove('pulse');
+  $('verdict').style.visibility = 'visible';
+
   // gauge ring + count-up
   const ring = $('ring');
   ring.style.strokeDasharray = RING_C;
@@ -415,41 +500,47 @@ function render(d) {
   $('tokname').textContent = d.currency_name;
   $('issuerLine').textContent = d.issuer;
 
-  // stat tiles from the same facts the API returns
+  // Stat tiles reveal one at a time -- not because the backend resolved them
+  // separately (one API call returns all of it at once, see the comment above
+  // showSkeleton), but because an instant snap-in read as less "alive" than a
+  // brief, deliberate assembly. Same reasoning for the reason rows below.
   const stats = $('stats'); stats.innerHTML = '';
-  for (const s of fmtStat(d.facts || {})) {
+  fmtStat(d.facts || {}).forEach((s, i) => {
     const div = document.createElement('div');
-    div.className = 'stat';
+    div.className = 'stat itemin';
+    div.style.animationDelay = (i * 70) + 'ms';
     const vClass = String(s.v).length > 12 ? 'v small' : 'v';
     div.innerHTML = `<div class="k">${s.k}</div><div class="${vClass}"${s.color ? ` style="color:${s.color}"` : ''}>${s.v}</div>`;
     stats.appendChild(div);
-  }
+  });
 
-  // reasons with severity chips + magnitude bars
+  // reasons with severity chips + magnitude bars, staggered in after the tiles
   const ul = $('reasons'); ul.innerHTML = '';
+  const baseDelay = 4 * 70; // let the stat tiles finish landing first
   const fills = [];
-  for (const rs of d.reasons) {
+  d.reasons.forEach((rs, i) => {
     const sev = SEVC[rs.severity] || '#9db2ff';
     const barColor = rs.points >= 0 ? 'var(--trusted)' : sev;
     const width = Math.min(100, Math.abs(rs.points) / 25 * 100);
     const sign = rs.points >= 0 ? '+' : '';
     const li = document.createElement('li');
+    li.className = 'itemin';
+    li.style.animationDelay = (baseDelay + i * 80) + 'ms';
     li.innerHTML =
       `<span class="sev" style="color:${sev};border-color:${sev}55;background:${sev}14">${rs.severity}</span>` +
       `<span class="rlabel">${rs.label}</span>` +
       `<span class="rmeter"><span class="rbar"><i style="background:${barColor}"></i></span>` +
       `<span class="pts" style="color:${barColor}">${sign}${rs.points}</span></span>`;
     ul.appendChild(li);
-    fills.push([li.querySelector('.rbar i'), width]);
+    fills.push([li.querySelector('.rbar i'), width, baseDelay + i * 80 + 200]);
+  });
+  for (const [el, w, delay] of fills) {
+    setTimeout(() => { el.style.width = w + '%'; }, reduceMotion ? 0 : delay);
   }
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    for (const [el, w] of fills) el.style.width = w + '%';
-  }));
 
   $('foot').textContent = d.disclaimer;
   $('feats').style.display = 'none';
   card.style.display = 'block';
-  card.classList.remove('reveal'); void card.offsetWidth; card.classList.add('reveal');
 
   // Make the exact result shareable/deep-linkable without a page reload.
   const url = new URL(location.href);
