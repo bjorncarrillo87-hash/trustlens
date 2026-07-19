@@ -301,6 +301,18 @@ def score_token(issuer: str, currency: str) -> TokenScore:
         top = max(balances)
         top_share = top / total_held if total_held else 0
         facts["top_holder_share"] = round(top_share, 4)
+        # account_lines isn't sorted by balance, so when the walk hit the page cap
+        # (lines["capped"], e.g. SOLO's 200k+ holders vs. our ~2,400-entry ceiling)
+        # this "top holder" is only the largest one seen in that sample -- the real
+        # largest holder across the full set could easily be someone we never saw.
+        # Disclose that plainly rather than presenting a sampled figure as exhaustive
+        # -- the whole point of this rubric is that nothing is a black box.
+        facts["top_holder_sampled"] = bool(lines["capped"])
+        sample_note = (
+            " (based on a sample of the largest ~2,400 trustlines seen -- this token has "
+            "far more holders, so the true figure could differ)"
+            if lines["capped"] else ""
+        )
         # For a verified issuer the biggest holder is usually a treasury/AMM/exchange,
         # not a rug wallet, so we weight concentration more gently in that case.
         soften = 0.5 if domain_verified else 1.0
@@ -311,7 +323,7 @@ def score_token(issuer: str, currency: str) -> TokenScore:
                 Reason(
                     "supply_concentrated",
                     f"A single holder controls {top_share:.0%} of circulating supply - "
-                    "high rug/dump risk.",
+                    f"high rug/dump risk.{sample_note}",
                     "high" if not domain_verified else "medium",
                     pts,
                 )
@@ -322,7 +334,7 @@ def score_token(issuer: str, currency: str) -> TokenScore:
             reasons.append(
                 Reason(
                     "supply_somewhat_concentrated",
-                    f"Top holder controls {top_share:.0%} of supply.",
+                    f"Top holder controls {top_share:.0%} of supply.{sample_note}",
                     "medium",
                     pts,
                 )

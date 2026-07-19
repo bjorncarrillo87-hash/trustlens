@@ -20,7 +20,7 @@ def hexstr(s: str) -> str:
 
 def mock_ledger(*, flags, domain=None, regular_key=False, signer_list=False,
                 supply=1000.0, currency="ABC", holders=None, amm_xrp=None,
-                toml_verified=None):
+                toml_verified=None, capped=False):
     """Patch the ledger module with a fixed token profile.
 
     ``toml_verified`` mocks the xrp-ledger.toml check added 2026-07-10 (real
@@ -46,7 +46,7 @@ def mock_ledger(*, flags, domain=None, regular_key=False, signer_list=False,
         "obligations": {currency: str(supply)}
     }
     ledger.account_lines = lambda issuer, cur, ledger_index="validated", **kw: {
-        "balances": holders if holders is not None else [], "capped": False
+        "balances": holders if holders is not None else [], "capped": capped
     }
     ledger.amm_info = lambda issuer, cur, ledger_index="validated": (
         {"amount": str(int(amm_xrp * 1_000_000))} if amm_xrp else None
@@ -168,6 +168,35 @@ check("established footprint does NOT rescue a proven domain mismatch",
       "a proven mismatch should still fall to the harshest tier despite real usage")
 check("established footprint does NOT rescue a proven clawback mismatch",
       any(x["signal"] == "clawback_anon_issuer" for x in r["reasons"]))
+
+# 3f. Top-holder concentration must disclose when it's a SAMPLE, not the full
+# holder set -- added 2026-07-15. account_lines isn't sorted by balance, so once
+# the walk hits the page cap (a very-widely-held token like SOLO), the "top
+# holder" found is only the largest one seen in that partial sample; presenting
+# it as if exhaustive would contradict the whole "no black box" premise.
+mock_ledger(
+    flags={"disableMasterKey": False}, domain=None,
+    currency="BIG", supply=1_000_000.0, holders=[900.0, 100.0], amm_xrp=None, capped=True,
+)
+r = scoring.score_token("rHugeHolderCount", "BIG").to_dict()
+check("capped walk sets top_holder_sampled fact", r["facts"].get("top_holder_sampled") is True)
+concentrated = next((x for x in r["reasons"] if x["signal"] == "supply_concentrated"), None)
+check("sampled concentration reason discloses it's a sample",
+      concentrated is not None and "sample" in concentrated["label"].lower(),
+      str(concentrated))
+
+# 3g. Same token, NOT capped -- must NOT carry the sampling caveat (this is the
+# common case: most tokens have far fewer holders than the page cap).
+mock_ledger(
+    flags={"disableMasterKey": False}, domain=None,
+    currency="SMALL", supply=1_000_000.0, holders=[900.0, 100.0], amm_xrp=None, capped=False,
+)
+r = scoring.score_token("rNormalHolderCount", "SMALL").to_dict()
+check("uncapped walk does NOT set top_holder_sampled", r["facts"].get("top_holder_sampled") is False)
+concentrated = next((x for x in r["reasons"] if x["signal"] == "supply_concentrated"), None)
+check("uncapped concentration reason has no sampling caveat",
+      concentrated is not None and "sample" not in concentrated["label"].lower(),
+      str(concentrated))
 
 # 4. Fake blackhole via multisig without a domain must NOT read as blackholed.
 mock_ledger(

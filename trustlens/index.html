@@ -195,6 +195,7 @@
   .stat .k { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin-bottom: 5px; }
   .stat .v { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .stat .v.small { font-size: 14px; }
+  .stat .v.sampled { cursor: help; border-bottom: 1px dotted var(--dim); display: inline-block; }
 
   /* ---------- reasons ---------- */
   .rhead { margin: 26px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 1.4px; color: var(--dim); }
@@ -457,8 +458,17 @@ function fmtStat(facts) {
   const holders = facts.holder_count ?? '—';
   const amm = typeof facts.amm_xrp_liquidity === 'number' && facts.amm_xrp_liquidity > 0
     ? facts.amm_xrp_liquidity.toLocaleString(undefined, {maximumFractionDigits: 0}) + ' XRP' : 'None';
+  // account_lines isn't sorted by balance, so once the holder walk hits the page
+  // cap (a very-widely-held token like SOLO), "top holder" only reflects the
+  // largest holder found in that ~2,400-entry sample -- the true largest holder
+  // across the full set could be someone never seen. Flag it rather than present
+  // a sampled figure as if it were exhaustive.
+  const topSampled = facts.top_holder_sampled === true;
   const top = typeof facts.top_holder_share === 'number'
-    ? (facts.top_holder_share * 100).toFixed(0) + '%' : '—';
+    ? (topSampled ? '~' : '') + (facts.top_holder_share * 100).toFixed(0) + '%' : '—';
+  const topTitle = topSampled
+    ? 'Estimated from the largest ~2,400 trustlines seen, not the full holder set -- this token has too many holders to walk exhaustively.'
+    : '';
   let idVal = 'None', idColor = 'var(--dim)';
   if (facts.domain_toml_verified === true)      { idVal = 'Verified';   idColor = 'var(--trusted)'; }
   else if (facts.domain_toml_verified === false){ idVal = 'Mismatch';   idColor = 'var(--danger)'; }
@@ -466,7 +476,7 @@ function fmtStat(facts) {
   return [
     { k: 'Holders', v: holders },
     { k: 'AMM liquidity', v: amm },
-    { k: 'Top holder', v: top },
+    { k: 'Top holder', v: top, title: topTitle },
     { k: 'Identity', v: idVal, color: idColor },
   ];
 }
@@ -504,7 +514,9 @@ function render(d) {
     div.className = 'stat itemin';
     div.style.animationDelay = (i * 70) + 'ms';
     const vClass = String(s.v).length > 12 ? 'v small' : 'v';
-    div.innerHTML = `<div class="k">${s.k}</div><div class="${vClass}"${s.color ? ` style="color:${s.color}"` : ''}>${s.v}</div>`;
+    const sampledCls = s.title ? ' sampled' : '';
+    const titleAttr = s.title ? ` title="${s.title.replace(/"/g, '&quot;')}"` : '';
+    div.innerHTML = `<div class="k">${s.k}</div><div class="${vClass}${sampledCls}"${s.color ? ` style="color:${s.color}"` : ''}${titleAttr}>${s.v}</div>`;
     stats.appendChild(div);
   });
 
