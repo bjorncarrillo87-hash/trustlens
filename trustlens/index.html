@@ -149,26 +149,20 @@
 
   .head { display: flex; align-items: center; gap: 26px; flex-wrap: wrap; }
   .gauge-wrap { position: relative; width: 128px; height: 128px; flex: 0 0 auto; }
-  /* Ambient glow lives on its own soft, evenly-blurred circle BEHIND the ring --
-     not a filter:drop-shadow on the ring itself. drop-shadow follows the exact
-     stroked arc path (including the rounded linecap), which reads as a lumpy,
-     muddy smear rather than a clean halo -- most visible on amber/caution,
-     flagged as "ugly" 2026-07-14. This gives a smooth glow regardless of arc angle. */
-  .gauge-wrap::before { content: ""; position: absolute; inset: 14%; border-radius: 50%;
-    background: var(--vc); filter: blur(20px); opacity: .3; z-index: -1;
-    transition: background-color .3s, opacity .3s; }
-  .gauge-wrap svg { width: 100%; height: 100%; transform: rotate(-90deg); position: relative; z-index: 1; }
+  /* No glow, by request 2026-07-15 -- the ambient backdrop blur (added to fix an
+     earlier lumpy drop-shadow) still read as an ugly smear sitting inside the
+     ring on real screens. Flat, crisp color only. */
+  .gauge-wrap svg { width: 100%; height: 100%; transform: rotate(-90deg); }
   .gauge-wrap .track { fill: none; stroke: rgba(124,146,255,.12); stroke-width: 9; }
   .gauge-wrap .ring { fill: none; stroke: var(--vc); stroke-width: 9; stroke-linecap: round;
     transition: stroke-dashoffset 1.1s cubic-bezier(.25,.8,.3,1), stroke .3s; }
-  .gauge-center { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; z-index: 1; }
+  .gauge-center { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
   .gauge-center .num { font-size: 37px; font-weight: 800; letter-spacing: -1px; color: var(--vc); line-height: 1;
-    font-variant-numeric: tabular-nums; text-shadow: 0 0 14px color-mix(in srgb, var(--vc) 35%, transparent); }
+    font-variant-numeric: tabular-nums; }
   .gauge-center .of { font-size: 11px; color: var(--dim); margin-top: 3px; letter-spacing: 1px; }
 
   /* ---------- loading state: indeterminate spinning arc, shown the instant Scan
      is pressed, before the (single, atomic) API response comes back ---------- */
-  .gauge-wrap.loading::before { opacity: .14; }
   .gauge-wrap.loading .ring { stroke: var(--accent); stroke-dasharray: 58 269; stroke-dashoffset: 0;
     transition: none; transform-box: fill-box; transform-origin: center; animation: gaugespin 1s linear infinite; }
   @keyframes gaugespin { to { transform: rotate(360deg); } }
